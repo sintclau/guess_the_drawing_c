@@ -1,14 +1,14 @@
 # Proiect: Guess the Drawing (ASCII Multiplayer Game)
 
 ## Descriere
-Acest proiect este un joc multiplayer ASCII realizat în C, folosind `ncurses` pentru interfața grafică și `sockets` pentru comunicarea între server și clienți. Jocul presupune că un jucător desenează un cuvânt ales de server, iar ceilalți încearcă să ghicească.
+Acest proiect este un joc multiplayer ASCII realizat în C, folosind `ncurses` pentru interfața grafică și `sockets` pentru comunicarea între server și clienți. Jocul presupune că un jucător desenează un cuvânt ales de server, iar ceilalți încearcă să ghicească. Scopul este de a ghici cuvântul cât mai repede, pentru a acumula cât mai multe puncte. Desenul si raspunsurile sunt vizibile pentru toti jucatorii in timp real, iar
+cuvantul de ghicit/desenat va fi afisat doar pentru jucatorul care deseneaza. Serverul va primi o matrice cu desenul de la clientul care deseneaza si va trimite matricea catre clientii care ghicesc cuvantul.
 
 ## Tehnologii și Biblioteci Utilizate
 - **Limbaj de programare:** C
 - **Biblioteci principale:**
   - `ncurses` (pentru interfața ASCII)
   - `sys/socket.h`, `arpa/inet.h` (pentru rețea)
-  - `pthread` (pentru gestionarea conexiunilor multiple)
 - **Model client-server:** TCP/IP, cu un server central găzduit pe un VPS
 
 ## Structura Proiectului
@@ -47,5 +47,5 @@ Acest proiect este un joc multiplayer ASCII realizat în C, folosind `ncurses` p
    ```
 4. Se rulează clientul:
    ```bash
-   ./client
+   ./client <username> <server_ip>
    ```

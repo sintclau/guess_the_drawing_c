@@ -7,3 +7,6 @@
 # Ignore compiled files
 client
 server
+
+# Ignore tutorial files
+ncurses_tutorial.txt
