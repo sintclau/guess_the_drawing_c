@@ -1,0 +1,9 @@
+# Ignore environment variable files
+.env
+
+# Ignore IDE specific files
+.vscode/
+
+# Ignore compiled files
+client
+server
