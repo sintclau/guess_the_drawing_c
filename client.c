@@ -1,13 +1,19 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
 #include <ncurses.h>
 
 #define MAX_WIDTH 40
 #define MAX_HEIGHT 120
+#define MAX_CLIENTS 10
+#define PORT 9000
 
 typedef struct {
     int gameMode; // 0 - lobby, 1 - guessing, 2 - drawing
-    char *word;
+    char word[20];
+    char drawing[MAX_WIDTH-1][MAX_HEIGHT-1];
 } gameDataS;
 
 typedef struct {
@@ -17,69 +23,99 @@ typedef struct {
 } user_cursor;
 
 typedef struct {
-    char *username;
+    char username[50];
     int points;
     int ready;
 } user;
 
-void drawingScreen(user *myUser, user **userList, int userListSize, int toolType) {
+gameDataS gameData;
+user myUser;
+user_cursor cursor = {MAX_WIDTH / 2, MAX_HEIGHT / 2, 1};
+user userList[MAX_CLIENTS];
+int sockfd;
+
+void clearDrawing() {
+    for (int i = 0; i < MAX_WIDTH-2; i++) {
+        for (int j = 0; j < MAX_HEIGHT-2; j++) {
+            gameData.drawing[i][j] = ' ';  // Clear inside the borders
+        }
+    }
+}
+
+void drawingScreen() {
     move(0, 0);
     printw("Guess the Drawing -- Username: %s -- Points: %d -- Selected tool: %s", 
-           myUser->username, myUser->points, toolType ? "Pencil" : "Eraser");
-    
+           myUser.username, myUser.points, cursor.tool_type ? "Pencil" : "Eraser");
+
     for (int i = 1; i < MAX_WIDTH; i++) {
         for (int j = 0; j < MAX_HEIGHT; j++) {
-            if ((i != 1 || i != (MAX_WIDTH - 1)) && (j == 0 || j == (MAX_HEIGHT - 1))) {
-                mvprintw(i, j, "=");
-            } else if (i == 1 || i == (MAX_WIDTH - 1)) {
-                mvprintw(i, j, "=");
+            if (i == 1 || i == MAX_WIDTH-1 || j == 0 || j == MAX_HEIGHT-1) {
+                mvprintw(i, j, "=");  // Draw border
+            } else {
+                mvprintw(i, j, "%c", gameData.drawing[i][j]);  // Display drawing inside
             }
         }
     }
 }
 
-void lobbyScreen(user *myUser, user **userList, int userListSize) {
+
+void guessingScreen() {
+    move(0, 0);
+    printw("Guess the Drawing -- Username: %s -- Points: %d", 
+           myUser.username, myUser.points);
+}
+
+void lobbyScreen() {
     move(0, 0);
     printw("Guess the Drawing -- Lobby\n\n");
-    for (int i = 0; i < userListSize; i++) {
+    for (int i = 0; i < MAX_CLIENTS; i++) {
         printw("%s - %d points - %s\n", 
-               userList[i]->username, userList[i]->points, 
-               userList[i]->ready ? "READY" : "UNREADY");
+               userList[i].username, userList[i].points, 
+               userList[i].ready ? "READY" : "UNREADY");
     }
 }
 
-void game(user *myUser, user **userList, int *userListSize, gameDataS *gameData) {
+void game() {
+    // init screen and sets up screen
     initscr();
-    keypad(stdscr, TRUE);
-    noecho();
-    curs_set(0);
-    user_cursor cursor = {MAX_WIDTH / 2, MAX_HEIGHT / 2, 1};
+    keypad(stdscr, TRUE); // enable arrow keys
+    noecho(); // dont display typed chars
+    curs_set(0); // hide cursor
     
-    switch (gameData->gameMode) {
+    switch (gameData.gameMode) {
         case 0:
-            lobbyScreen(myUser, userList, *userListSize);
+            lobbyScreen();
+            break;
+        case 1:
+            guessingScreen();
             break;
         case 2:
-            drawingScreen(myUser, userList, *userListSize, cursor.tool_type);
+            clearDrawing();
+            drawingScreen();
             break;
     }
     
     refresh();
     int ch;
     while ((ch = getch()) != 'q') {
-        switch (gameData->gameMode) {
+        switch (gameData.gameMode) {
             case 0:
                 if (ch == ' ') {
-                    myUser->ready = !myUser->ready;
-                    userList[0]->ready = myUser->ready;
+                    myUser.ready = !myUser.ready;
+                    userList[0].ready = myUser.ready;
                 }
-                lobbyScreen(myUser, userList, *userListSize);
+                lobbyScreen();
+                break;
+            case 1:
+                guessingScreen();
                 break;
             case 2:
                 if (cursor.tool_type == 1) {
                     mvprintw(cursor.x, cursor.y, "O");
+                    gameData.drawing[cursor.x][cursor.y] = 'O';
                 } else {
                     mvprintw(cursor.x, cursor.y, " ");
+                    gameData.drawing[cursor.x][cursor.y] = ' ';
                 }
 
                 switch (ch) {
@@ -89,8 +125,12 @@ void game(user *myUser, user **userList, int *userListSize, gameDataS *gameData)
                     case KEY_RIGHT: cursor.y = (cursor.y < MAX_HEIGHT - 2) ? cursor.y + 1 : cursor.y; break;
                     case 't': cursor.tool_type = !cursor.tool_type; break;
                 }
+
+                // show user cursor position
                 mvprintw(cursor.x, cursor.y, "X");
-                drawingScreen(myUser, userList, *userListSize, cursor.tool_type);
+                gameData.drawing[cursor.x][cursor.y] = 'X';
+
+                drawingScreen();
                 break;
         }
         refresh();
@@ -112,11 +152,27 @@ int main(int argc, char **argv) {
         }
     }
     
-    user myUser = {argv[1], 0, 0};
-    user *userList[] = {&myUser, &(user){"test", 0, 0}};
-    int userListSize = 2;
-    gameDataS gameData = {0, "test"};
+    // SERVER CONNECTION
+    struct sockaddr_in serverAddr;
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(PORT);
+    inet_pton(AF_INET, argv[2], &serverAddr.sin_addr);
+
+    if (connect(sockfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
+        perror("Connection failed");
+        return 1;
+    }
+
+    // GAME
+    strcpy(myUser.username, argv[1]);
+    myUser.ready = 0;
+    myUser.points = 0;
+    gameData.gameMode = 2;
+    strcpy(gameData.word, "test");
     
-    game(&myUser, userList, &userListSize, &gameData);
+    game();
+    close(sockfd);
+    
     return 0;
 }
