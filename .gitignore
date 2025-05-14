@@ -9,4 +9,4 @@ client
 server
 
 # Ignore tutorial files
-ncurses_tutorial.txt
+tutorial/
