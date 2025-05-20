@@ -3,176 +3,226 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include <ncurses.h>
+#include <sys/socket.h>
+#include <pthread.h>
+#include <time.h>
+#include "raylib.h"
 
-#define MAX_WIDTH 40
-#define MAX_HEIGHT 120
-#define MAX_CLIENTS 10
-#define PORT 9000
+#define SERVER_PORT 12345
+#define DRAWING_WIDTH 40
+#define DRAWING_HEIGHT 20
+#define CELL_SIZE 20
+#define MAX_INPUT 128
+#define ROUND_DURATION 90
 
-typedef struct {
-    int gameMode; // 0 - lobby, 1 - guessing, 2 - drawing
-    char word[20];
-    char drawing[MAX_WIDTH-1][MAX_HEIGHT-1];
-} gameDataS;
+char drawing[DRAWING_HEIGHT][DRAWING_WIDTH];
+char username[32];
+int is_drawing_player = 0;
+int socket_fd;
 
-typedef struct {
-    int x;
-    int y;
-    int tool_type;
-} user_cursor;
+char status_message[128] = "";
+float status_timer = 0.0f;
+char hint_display[128] = "";
+char word_display[64] = "";
+char drawer_name[64] = "";
 
-typedef struct {
-    char username[50];
-    int points;
-    int ready;
-} user;
+float time_left = ROUND_DURATION;
+int connection_lost = 0;
+float disconnect_timer = 0.0f;
 
-gameDataS gameData;
-user myUser;
-user_cursor cursor = {MAX_WIDTH / 2, MAX_HEIGHT / 2, 1};
-user userList[MAX_CLIENTS];
-int sockfd;
+void *network_thread(void *arg) {
+    char buffer[2048];
+    while (1) {
+        int valread = recv(socket_fd, buffer, sizeof(buffer) - 1, 0);
+        if (valread <= 0) {
+            connection_lost = 1;
+            disconnect_timer = 3.0f;
+            break;
+        }
+        buffer[valread] = '\0';
 
-void clearDrawing() {
-    for (int i = 0; i < MAX_WIDTH-2; i++) {
-        for (int j = 0; j < MAX_HEIGHT-2; j++) {
-            gameData.drawing[i][j] = ' ';  // Clear inside the borders
+        char *line = strtok(buffer, "\n");
+        while (line != NULL) {
+            if (strcmp(line, "ROLE:DRAW") == 0) {
+                is_drawing_player = 1;
+                printf("You are the drawing player.\n");
+                hint_display[0] = '\0';
+            } else if (strcmp(line, "ROLE:GUESS") == 0) {
+                is_drawing_player = 0;
+                printf("You are a guesser.\n");
+                word_display[0] = '\0';
+            } else if (strncmp(line, "WORD:", 5) == 0) {
+                strncpy(word_display, line + 5, sizeof(word_display));
+            } else if (strncmp(line, "DRAWER:", 7) == 0) {
+                strncpy(drawer_name, line + 7, sizeof(drawer_name));
+            } else if (strcmp(line, "DRAWING_UPDATE") == 0) {
+                memset(drawing, ' ', sizeof(drawing));
+                for (int i = 0; i < DRAWING_HEIGHT; ++i) {
+                    line = strtok(NULL, "\n");
+                    if (line != NULL) {
+                        strncpy(drawing[i], line, DRAWING_WIDTH);
+                    }
+                }
+            } else if (strncmp(line, "CORRECT!", 8) == 0) {
+                strncpy(status_message, line, sizeof(status_message));
+                status_timer = 3.0f;
+                printf("%s\n", line);
+            } else if (strncmp(line, "HINT:", 5) == 0) {
+                strncpy(hint_display, line + 5, sizeof(hint_display));
+            } else if (strncmp(line, "TIMER:", 6) == 0) {
+                time_left = atof(line + 6);
+            } else {
+                printf("%s\n", line);
+            }
+
+            line = strtok(NULL, "\n");
         }
     }
+    return NULL;
 }
 
-void drawingScreen() {
-    move(0, 0);
-    printw("Guess the Drawing -- Username: %s -- Points: %d -- Selected tool: %s", 
-           myUser.username, myUser.points, cursor.tool_type ? "Pencil" : "Eraser");
+void send_drawing_to_server() {
+    char buffer[DRAWING_WIDTH * DRAWING_HEIGHT + 10];
+    strcpy(buffer, "DRAW:");
+    int k = 5;
+    for (int y = 0; y < DRAWING_HEIGHT; ++y) {
+        for (int x = 0; x < DRAWING_WIDTH; ++x) {
+            buffer[k++] = drawing[y][x];
+        }
+    }
+    buffer[k] = '\0';
+    send(socket_fd, buffer, strlen(buffer), 0);
+}
 
-    for (int i = 1; i < MAX_WIDTH; i++) {
-        for (int j = 0; j < MAX_HEIGHT; j++) {
-            if (i == 1 || i == MAX_WIDTH-1 || j == 0 || j == MAX_HEIGHT-1) {
-                mvprintw(i, j, "=");  // Draw border
-            } else {
-                mvprintw(i, j, "%c", gameData.drawing[i][j]);  // Display drawing inside
+void draw_grid() {
+    for (int y = 0; y < DRAWING_HEIGHT; ++y) {
+        for (int x = 0; x < DRAWING_WIDTH; ++x) {
+            if (drawing[y][x] != ' ') {
+                DrawRectangle(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE, DARKGRAY);
             }
         }
     }
 }
 
-
-void guessingScreen() {
-    move(0, 0);
-    printw("Guess the Drawing -- Username: %s -- Points: %d", 
-           myUser.username, myUser.points);
-}
-
-void lobbyScreen() {
-    move(0, 0);
-    printw("Guess the Drawing -- Lobby\n\n");
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-        printw("%s - %d points - %s\n", 
-               userList[i].username, userList[i].points, 
-               userList[i].ready ? "READY" : "UNREADY");
-    }
-}
-
-void game() {
-    // init screen and sets up screen
-    initscr();
-    keypad(stdscr, TRUE); // enable arrow keys
-    noecho(); // dont display typed chars
-    curs_set(0); // hide cursor
-    
-    switch (gameData.gameMode) {
-        case 0:
-            lobbyScreen();
-            break;
-        case 1:
-            guessingScreen();
-            break;
-        case 2:
-            clearDrawing();
-            drawingScreen();
-            break;
-    }
-    
-    refresh();
-    int ch;
-    while ((ch = getch()) != 'q') {
-        switch (gameData.gameMode) {
-            case 0:
-                if (ch == ' ') {
-                    myUser.ready = !myUser.ready;
-                    userList[0].ready = myUser.ready;
-                }
-                lobbyScreen();
-                break;
-            case 1:
-                guessingScreen();
-                break;
-            case 2:
-                if (cursor.tool_type == 1) {
-                    mvprintw(cursor.x, cursor.y, "O");
-                    gameData.drawing[cursor.x][cursor.y] = 'O';
-                } else {
-                    mvprintw(cursor.x, cursor.y, " ");
-                    gameData.drawing[cursor.x][cursor.y] = ' ';
-                }
-
-                switch (ch) {
-                    case KEY_UP: cursor.x = (cursor.x > 2) ? cursor.x - 1 : cursor.x; break;
-                    case KEY_DOWN: cursor.x = (cursor.x < MAX_WIDTH - 2) ? cursor.x + 1 : cursor.x; break;
-                    case KEY_LEFT: cursor.y = (cursor.y > 1) ? cursor.y - 1 : cursor.y; break;
-                    case KEY_RIGHT: cursor.y = (cursor.y < MAX_HEIGHT - 2) ? cursor.y + 1 : cursor.y; break;
-                    case 't': cursor.tool_type = !cursor.tool_type; break;
-                }
-
-                // show user cursor position
-                mvprintw(cursor.x, cursor.y, "X");
-                gameData.drawing[cursor.x][cursor.y] = 'X';
-
-                drawingScreen();
-                break;
-        }
-        refresh();
-    }
-    endwin();
-}
-
-int main(int argc, char **argv) {
+int main(int argc, char *argv[]) {
     if (argc != 3) {
         printf("Usage: %s <username> <server_ip>\n", argv[0]);
         return 1;
     }
-    
-    int a, b, c, d;
-    if (sscanf(argv[2], "%d.%d.%d.%d", &a, &b, &c, &d) != 4 || a < 0 || a > 255 || b < 0 || b > 255 || c < 0 || c > 255 || d < 0 || d > 255) {
-        if (strcmp(argv[2], "localhost") != 0) {
-            printf("Invalid server IP format\n");
-            return 1;
-        }
-    }
-    
-    // SERVER CONNECTION
-    struct sockaddr_in serverAddr;
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(PORT);
-    inet_pton(AF_INET, argv[2], &serverAddr.sin_addr);
 
-    if (connect(sockfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
+    strcpy(username, argv[1]);
+    const char *server_ip = argv[2];
+
+    struct sockaddr_in server_addr;
+    socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(SERVER_PORT);
+    inet_pton(AF_INET, server_ip, &server_addr.sin_addr);
+
+    if (connect(socket_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         perror("Connection failed");
         return 1;
     }
 
-    // GAME
-    strcpy(myUser.username, argv[1]);
-    myUser.ready = 0;
-    myUser.points = 0;
-    gameData.gameMode = 2;
-    strcpy(gameData.word, "test");
-    
-    game();
-    close(sockfd);
-    
+    send(socket_fd, username, strlen(username), 0);
+
+    memset(drawing, ' ', sizeof(drawing));
+
+    pthread_t net_thread;
+    pthread_create(&net_thread, NULL, network_thread, NULL);
+
+    InitWindow(DRAWING_WIDTH * CELL_SIZE, DRAWING_HEIGHT * CELL_SIZE + 100, "Guess the Drawing");
+    SetTargetFPS(30);
+
+    char guess_input[MAX_INPUT] = "";
+
+    while (!WindowShouldClose()) {
+        if (connection_lost) {
+            disconnect_timer -= GetFrameTime();
+            if (disconnect_timer <= 0.0f) {
+                break;
+            }
+        }
+
+        if (status_timer > 0.0f) {
+            status_timer -= GetFrameTime();
+            if (status_timer < 0.0f) status_timer = 0.0f;
+        }
+
+        if (is_drawing_player && IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
+            Vector2 mouse = GetMousePosition();
+            int x = mouse.x / CELL_SIZE;
+            int y = mouse.y / CELL_SIZE;
+            if (x >= 0 && x < DRAWING_WIDTH && y >= 0 && y < DRAWING_HEIGHT) {
+                drawing[y][x] = '#';
+                send_drawing_to_server();
+            }
+        }
+
+        if (is_drawing_player && IsKeyPressed(KEY_C)) {
+            send(socket_fd, "CLEAR", 5, 0);
+        }
+
+        if (!is_drawing_player) {
+            int key = GetCharPressed();
+            if (key >= 32 && key <= 126 && strlen(guess_input) < MAX_INPUT - 1) {
+                int len = strlen(guess_input);
+                guess_input[len] = (char)key;
+                guess_input[len + 1] = '\0';
+            } else if (key == KEY_BACKSPACE && strlen(guess_input) > 0) {
+                guess_input[strlen(guess_input) - 1] = '\0';
+            }
+
+            if (IsKeyPressed(KEY_ENTER)) {
+                char msg[MAX_INPUT + 10];
+                snprintf(msg, sizeof(msg), "GUESS:%s", guess_input);
+                send(socket_fd, msg, strlen(msg), 0);
+                guess_input[0] = '\0';
+            }
+        }
+
+        BeginDrawing();
+        ClearBackground(RAYWHITE);
+        draw_grid();
+
+        DrawRectangle(10, 10, DRAWING_WIDTH * CELL_SIZE - 20, 20, LIGHTGRAY);
+        float timeRatio = time_left / ROUND_DURATION;
+        DrawRectangle(10, 10, (int)((DRAWING_WIDTH * CELL_SIZE - 20) * timeRatio), 20, RED);
+        DrawText(TextFormat("%.0f sec", time_left), DRAWING_WIDTH * CELL_SIZE - 60, 12, 18, BLACK);
+
+        if (connection_lost) {
+            DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(RED, 0.6f));
+            DrawText("Connection lost", GetScreenWidth() / 2 - 100, GetScreenHeight() / 2 - 20, 30, WHITE);
+        } else if (status_timer > 0.0f) {
+            DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(RAYWHITE, 0.8f));
+            DrawText(status_message, 20, GetScreenHeight() / 2 - 20, 30, DARKGREEN);
+        } else {
+            if (!is_drawing_player) {
+                DrawText(TextFormat("Drawer: %s", drawer_name), 10, DRAWING_HEIGHT * CELL_SIZE + 10, 20, DARKGRAY);
+                DrawText("Your Guess:", 10, DRAWING_HEIGHT * CELL_SIZE + 35, 20, DARKGRAY);
+                DrawText(guess_input, 150, DRAWING_HEIGHT * CELL_SIZE + 35, 20, BLACK);
+
+                Rectangle skipBtn = {DRAWING_WIDTH * CELL_SIZE - 110, DRAWING_HEIGHT * CELL_SIZE + 10, 100, 30};
+                DrawRectangleRec(skipBtn, LIGHTGRAY);
+                DrawText("Skip", skipBtn.x + 30, skipBtn.y + 5, 20, BLACK);
+                if (CheckCollisionPointRec(GetMousePosition(), skipBtn) && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+                    send(socket_fd, "SKIP", 4, 0);
+                }
+            } else {
+                DrawText("You are drawing! Press 'C' to clear.", 10, DRAWING_HEIGHT * CELL_SIZE + 10, 20, DARKGRAY);
+                DrawText(TextFormat("Word: %s", word_display), 10, DRAWING_HEIGHT * CELL_SIZE + 35, 20, DARKGRAY);
+            }
+
+            if (hint_display[0] != '\0') {
+                DrawText(TextFormat("Hint: %s", hint_display), 10, DRAWING_HEIGHT * CELL_SIZE + 60, 20, GRAY);
+            }
+        }
+
+        EndDrawing();
+    }
+
+    CloseWindow();
+    close(socket_fd);
     return 0;
 }

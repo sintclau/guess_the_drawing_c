@@ -1,0 +1,12 @@
+cat
+fish
+tree
+dog
+bird
+house
+car
+mouse
+apple
+banana
+orange
+rose
